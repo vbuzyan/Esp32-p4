@@ -51,9 +51,21 @@
 #define TOUCH_GT911_ADDR_HIGH  0x14       // INT held high at reset
 
 // ---------------------------------------------------------------------------
-// ESP32-C6 wireless co-processor link (SDIO)  --  THE MOST IMPORTANT PINS
-// These drive ALL WiFi/BLE via esp_wifi_remote / esp-hosted. Not yet known.
-// Read them off the schematic before anything wireless can work.
+// GhostLink UART link to the added WiFi module (RECOMMENDED radio path)
+// 3 wires: P4_TX -> module_RX, P4_RX -> module_TX, GND. 115200 baud.
+// Pick two free P4 GPIOs NOT used by DSI / touch / SD / audio, then set them
+// at runtime with `commsetpins <TX> <RX>` (persisted). GhostESP default is
+// TX=6 / RX=7, but GPIO6/7 are the module-bay SPI SCK/MISO on this board, so
+// choose different pins here to avoid a collision.
+// ---------------------------------------------------------------------------
+#define GHOSTLINK_UART_TX_PIN  (-1)       // [TODO] free GPIO -> module RX
+#define GHOSTLINK_UART_RX_PIN  (-1)       // [TODO] free GPIO -> module TX
+
+// ---------------------------------------------------------------------------
+// ESP32-C6 onboard co-processor link (SDIO) -- OPTIONAL (Phase 3 only)
+// Only needed if you want the P4 itself to join WiFi / host its own WebUI via
+// esp_wifi_remote / esp-hosted. NOT needed for the GhostLink relay path above.
+// Read these off the schematic before enabling onboard WiFi.
 // ---------------------------------------------------------------------------
 #define C6_SDIO_CLK_PIN        (-1)       // [TODO]
 #define C6_SDIO_CMD_PIN        (-1)       // [TODO]

@@ -1,216 +1,210 @@
 # Porting GhostESP to the CrowPanel Advanced 9" ESP32-P4
 
-This document scopes the work required to run [GhostESP](https://github.com/GhostESP-Revival/GhostESP)
-on the Elecrow CrowPanel Advanced 9-inch ESP32-P4 HMI board (`DHE04209D`). It is
-written to be actionable: each section states what exists today, what is
-missing, and the concrete steps to close the gap.
-
-It is deliberately honest about feasibility. The headline conclusion:
-
-> Bringing up the **board** (boot, display, touch, SD, basic WiFi-via-C6
-> connectivity) is a **normal, achievable port**. Making GhostESP's **offensive
-> WiFi features** (deauth, beacon spam, sniffing, handshake capture) work is a
-> **research-grade firmware effort** because the ESP32-P4 cannot drive a radio
-> directly and the hosted-WiFi transport does not forward the required
-> low-level APIs.
+Roadmap to run [GhostESP](https://github.com/GhostESP-Revival/GhostESP) on the
+Elecrow CrowPanel Advanced 9-inch ESP32-P4 HMI board (`DHE04209D`), using a
+**dedicated WiFi module** as the radio.
 
 ---
 
-## 1. Architecture: why the ESP32-P4 is different
+## 1. Architecture: why the ESP32-P4 needs help
 
-Every other board GhostESP supports (ESP32, S2, S3, C3, C5, C6) has a WiFi/BLE
-radio **on the same die** as the CPU. GhostESP talks to that radio directly
-through `esp_wifi_*`, including the privileged monitor/injection paths.
+The ESP32-P4 is a fast RISC-V applications processor with **no WiFi and no
+Bluetooth radio.** Every other board GhostESP supports (ESP32, S2, S3, C3, C5,
+C6) has a radio on-die and lets GhostESP drive it directly — including the
+privileged monitor-mode and raw-injection paths that GhostESP is built on:
 
-The ESP32-P4 does **not** have a radio. On this board:
+- `esp_wifi_80211_tx` (raw frame injection) — used by every attack
+  (deauth, beacon spam, EAPOL logoff, auth flood, GTK abuse, channel-switch,
+  probe flood).
+- `esp_wifi_set_promiscuous` + RX callback — used by every sniffer/scanner
+  (airspace monitor, station scan, handshake/PMKID capture, packet monitor,
+  flock/aerial detectors).
+
+The P4 can borrow a radio in two ways. **We recommend the second.**
+
+### Option A — onboard C6 via esp-hosted (the hard way)
+
+The board has an ESP32-C6 wired over SDIO, driven by Espressif's
+[`esp-hosted`](https://github.com/espressif/esp-hosted-mcu) / `esp_wifi_remote`.
+Standard `esp_wifi_*` calls are forwarded P4→C6. **But** the hosted RPC layer
+does **not** forward `esp_wifi_80211_tx` or `esp_wifi_set_promiscuous` — those
+stubs are commented out. Making them work means writing a **custom-RPC extension
+on both the P4 and the C6 slave firmware** (demonstrated only as a proof of
+concept: [`r4d10n/esp32p4-c6-wifi-test`](https://github.com/r4d10n/esp32p4-c6-wifi-test)).
+This is research-grade firmware work and is **not** recommended as the primary
+path.
+
+### Option B — a dedicated WiFi module over GhostLink (recommended)
+
+Add a second ESP32 (C6/C5/S3) as the radio and connect it to the P4 with a
+3-wire UART. The module runs **stock GhostESP for its native target**, so all
+radio features work with zero custom firmware. The P4 relays commands to it and
+displays results.
 
 ```
-  ┌─────────────────┐        SDIO         ┌──────────────────┐
-  │   ESP32-P4      │  CLK/CMD/D0..D3     │    ESP32-C6      │
-  │  (host / apps)  │ ◄─────────────────► │ (WiFi6 + BLE5)   │
-  │                 │                     │  runs esp-hosted │
-  │ GhostESP UI,    │   esp_wifi_remote   │  "slave" firmware│
-  │ LVGL, logic     │   RPC forwarding    │                  │
-  └─────────────────┘                     └──────────────────┘
+   ┌──────────────────────────┐   3-wire UART    ┌───────────────────────────┐
+   │        ESP32-P4          │   TX/RX/GND      │   WiFi module (ESP32)     │
+   │   CrowPanel 9" display   │ ◄──────────────► │   C6 / C5 / S3            │
+   │  GhostESP UI + relay      │    GhostLink     │  full native GhostESP     │
+   └──────────────────────────┘                  └───────────────────────────┘
 ```
 
-- The P4 runs the application (GhostESP) **and** an `esp_wifi_remote` shim.
-- `esp_wifi_remote` serializes each `esp_wifi_*` call and ships it over SDIO to
-  the C6, which runs Espressif's **esp-hosted-mcu slave firmware** and executes
-  the real radio operation.
-- **The C6 must be flashed separately** with compatible slave firmware. This is
-  a second firmware image, not part of the P4 app.
-
-Consequences for a port:
-1. You maintain **two** firmware images (P4 host + C6 slave), and they must be
-   version-matched.
-2. Only the subset of `esp_wifi_*` that esp-hosted implements will work.
-3. Latency and throughput are bounded by the SDIO link, not the radio.
+Trade-off to be honest about: GhostLink relays **commands**, not raw frames, so
+the radio work (and any captured data / SD logging of it) happens **on the
+module**. The P4 drives it and shows output; live per-packet views that assume a
+local promiscuous callback will reflect the module's activity via relayed
+status, not a local frame stream. For the vast majority of GhostESP's workflow
+(scan, attack, capture-to-SD, wardrive) this is exactly how GhostLink is already
+used in the field.
 
 ---
 
-## 2. The core blocker: monitor mode & raw injection
+## 2. The core radio dependencies (evidence)
 
-GhostESP's identity is low-level 802.11. Confirmed by grepping the source tree:
+Confirmed by grepping the GhostESP tree, so the plan is grounded in fact:
 
-**`esp_wifi_80211_tx` (raw frame injection)** is used by:
-`main/managers/wifi_manager.c`, `main/managers/plugin_api_lowlevel.c`, and the
-attacks `eapol_logoff.c`, `beacon_spam.c`, `bad_msg.c`, `auth_flood.c`,
-`gtk_abuse.c`, `channel_switch_attack.c`, `deauth_attack.c`,
-`probe_request_flood.c`.
+- `esp_wifi_80211_tx` → `main/managers/wifi_manager.c`,
+  `main/managers/plugin_api_lowlevel.c`, and `main/attacks/wifi/`:
+  `eapol_logoff.c`, `beacon_spam.c`, `bad_msg.c`, `auth_flood.c`, `gtk_abuse.c`,
+  `channel_switch_attack.c`, `deauth_attack.c`, `probe_request_flood.c`.
+- `esp_wifi_set_promiscuous` → `scans/wifi/airspace_monitor.c`,
+  `scans/wifi/station_scan.c`, `scans/wifi/arp_scan.c`, `managers/wifi_manager.c`,
+  `managers/views/packet_monitor_screen.c`, `managers/flock_detector_manager.c`,
+  `managers/aerial_detector_manager.c`, `attacks/wifi/deauth_attack.c`,
+  `attacks/wifi/sae_flood.c`.
 
-**`esp_wifi_set_promiscuous` + promiscuous RX callback** is used by:
-`scans/wifi/airspace_monitor.c`, `scans/wifi/station_scan.c`,
-`scans/wifi/arp_scan.c`, `managers/wifi_manager.c`,
-`managers/views/packet_monitor_screen.c`, `managers/flock_detector_manager.c`,
-`managers/aerial_detector_manager.c`, `attacks/wifi/deauth_attack.c`,
-`attacks/wifi/sae_flood.c`.
-
-**Neither is forwarded by stock esp-hosted.** The reference bring-up project
-[`r4d10n/esp32p4-c6-wifi-test`](https://github.com/r4d10n/esp32p4-c6-wifi-test)
-documents this directly:
-
-| API                              | Direct (esp-hosted RPC) | Via CustomRpc extension |
-| -------------------------------- | ----------------------- | ----------------------- |
-| `esp_wifi_set_promiscuous`       | **NOT SUPPORTED**       | OK                      |
-| `esp_wifi_set_promiscuous_filter`| **NOT SUPPORTED**       | OK                      |
-| `esp_wifi_80211_tx`              | **NOT SUPPORTED**       | OK                      |
-
-Their workaround: a **CustomRpc extension** — extra RPC opcodes added to the C6
-slave firmware plus matching client stubs on the P4 — that (a) enables
-promiscuous mode on the C6 and streams captured frames back over SDIO to a P4
-callback, and (b) accepts raw frames from the P4 and calls `esp_wifi_80211_tx`
-locally on the C6. Their probe captured ~514 packets in 10 s, proving the path
-works, but it is a proof of concept, not a maintained library.
-
-### What this means for the three tiers of GhostESP features
-
-| Feature tier                                              | Feasibility on P4+C6 |
-| -------------------------------------------------------- | -------------------- |
-| **Connected-mode** (join AP, HTTP, WebUI, OTA, mDNS/NetBIOS/port scans, DNS sinkhole) | ✅ Works over stock esp-hosted — these use normal station-mode sockets. |
-| **Sniffing** (scans, handshake/PMKID capture, airspace monitor, packet monitor) | ⚠️ Needs the CustomRpc promiscuous path on the C6. |
-| **Injection** (deauth, beacon spam, karma, all attacks) | ⚠️ Needs the CustomRpc raw-TX path on the C6. |
-| **BLE** (scans, spam, AirTag, GATT)                      | ⚠️ Possible via HCI-over-hosted (NimBLE host on P4, controller on C6), but GhostESP's BLE manager assumes a local controller — needs rework. |
-| **SubGHz / IR / NFC / BadUSB**                           | Independent of the C6; depend only on P4 GPIO + expansion modules. BadUSB uses P4 USB-OTG. |
-
-**Bottom line:** without investing in the C6 CustomRpc firmware, you get a
-GhostESP that can join networks and do IP-layer recon but cannot deauth, spam,
-or sniff — i.e. not the tool people install GhostESP for.
+On a native-radio module these all Just Work — which is the whole point of
+Option B.
 
 ---
 
-## 3. Display & touch bring-up
+## 3. GhostLink: the clean way to use the added module
+
+GhostLink (docs: `getting-started/dual-communication.md`, hardware:
+`hardware/ghostlink-p1.md`) is GhostESP's two-device link:
+
+- **Transport:** UART, 115200 baud, 3 wires (TX→RX, RX→TX, GND).
+- **Model:** each board runs GhostESP; one sends command strings to the other.
+  Default GhostLink pins are **TX GPIO6 / RX GPIO7** (17/16 on classic ESP32);
+  changeable at runtime with `commsetpins <TX> <RX>` (persisted).
+- **Commands:** `commstatus`, `commsend <cmd>`, `commconnect`, `commdiscovery`,
+  `commdisconnect`. Example: `commsend attack -d`, `commsend capture -probe`.
+- **UI:** when connected, a split-view terminal shows local logs left, remote
+  responses right — ideal for the 9" panel.
+
+GhostESP even ships GhostLink board profiles as a reference for a
+core+peer split: `configs/sdkconfig.ghostlink_p1_core` (S3, `WITH_SCREEN=y`) and
+`configs/sdkconfig.ghostlink_p1_peer` (C3, headless radio). The P4 build is the
+analog of *core*; the WiFi module is the analog of *peer*.
+
+**Module choice:** any ESP32 GhostESP supports. Recommended **ESP32-C6** (WiFi 6
++ BLE, matches the board's radio) or **ESP32-C5** (adds 5 GHz). An **ESP32-S3**
+peer additionally unlocks USB/BadUSB-class features on the radio node. Flash it
+with the matching stock GhostESP release — nothing in this repo needed for the
+module itself.
+
+---
+
+## 4. Display & touch bring-up (P4 side)
 
 The 9" panel is **1024×600 MIPI-DSI** (ILI9881C-class, 2 data lanes). GhostESP
-renders its UI through **LVGL** on top of an `esp_lcd` panel handle.
+renders through **LVGL** on an `esp_lcd` panel handle.
 
 State of the tree:
-- GhostESP has **no wired-up MIPI-DSI path** in its own display manager. Its
-  `esp_lcd` drivers are SPI/QSPI/RGB (e.g. `main/vendor/drivers/ST7262.c` for
-  RGB). The only DSI code present lives inside the unused **M5GFX** C++ component
-  (`components/M5GFX/.../esp32p4/Panel_DSI.*`, `Panel_ILI9881C.*`) and is not
-  hooked into GhostESP's LVGL flush path.
-- **Touch is easier:** a GT911 driver already exists
-  (`components/lvgl_esp32_drivers/lvgl_touch/gt911.c`) and is reusable as-is once
-  the I²C pins are set.
+- GhostESP has **no wired-up MIPI-DSI path** in its display manager. Its
+  `esp_lcd` drivers are SPI/QSPI/RGB (e.g. `main/vendor/drivers/ST7262.c`). The
+  only DSI code present is inside the unused **M5GFX** C++ component
+  (`components/M5GFX/.../esp32p4/Panel_DSI.*`, `Panel_ILI9881C.*`), not hooked
+  into GhostESP's flush path.
+- **Touch is easy:** `components/lvgl_esp32_drivers/lvgl_touch/gt911.c` exists and
+  is reusable once I²C pins + reset/INT are set.
 
 Work required:
-1. Add a MIPI-DSI panel init using ESP-IDF v6's `esp_lcd_mipi_dsi` +
-   `esp_lcd_dpi_panel` APIs and the ILI9881C init sequence, producing an
-   `esp_lcd_panel_handle_t`.
-2. Point GhostESP's LVGL flush callback at that handle (double-buffered in
-   PSRAM; the P4 has ample RAM for a 1024×600 framebuffer).
-3. Wire GT911 into the LVGL input device with the board's I²C pins and reset/INT.
-4. Add a new display-controller branch/option so the board's `sdkconfig`
-   selects the DSI path rather than an SPI/RGB controller.
+1. MIPI-DSI panel init via ESP-IDF v6 `esp_lcd_mipi_dsi` + `esp_lcd_dpi_panel`
+   and the ILI9881C init sequence → an `esp_lcd_panel_handle_t`.
+2. Point GhostESP's LVGL flush at that handle (double-buffered in PSRAM — the P4
+   has room for a full 1024×600 framebuffer).
+3. Wire GT911 into LVGL input with the board's I²C pins + reset/INT.
+4. Add a display-controller option so the board `sdkconfig` selects the DSI path.
 
-This is standard ESP32-P4 LVGL bring-up; Elecrow's own `factory_sourcecode` and
-`example` folders in their board repo give a known-good DSI init sequence to
-copy timings from.
+Copy exact panel timings from Elecrow's `factory_sourcecode`/`example` folders in
+their board repo — don't guess porches or lane rate.
 
 ---
 
-## 4. Board profile & build integration
+## 5. Board profile & build integration (P4 side)
 
-None of GhostESP's plumbing knows about a P4 board yet. To add one:
+Nothing in GhostESP knows about a P4 board yet.
 
-1. **`configs/sdkconfig.crowpanel_p4_9inch`** — new board profile:
-   `CONFIG_IDF_TARGET_ESP32P4=y`, PSRAM on, partition table with OTA + SD, screen
-   enabled at 1024×600, the DSI display option from §3, GT911 touch, and the
-   `esp_wifi_remote` component pulled in.
-2. **`main/idf_component.yml`** — add `espressif/esp_wifi_remote` and
-   `espressif/esp_hosted` with a `target in ["esp32p4"]` rule (mirroring how
-   `elf_loader` is already gated). Note `elf_loader` already lists `esp32p4`, so
-   native SD apps are expected to compile on P4.
-3. **`main/CMakeLists.txt`** — a P4 branch: exclude S3-only components
-   (USB HID host, camera guards that assume local radio), include the DSI
-   display source and the `esp_wifi_remote` glue.
-4. **`build.py`** — add the board to the board list (`idf_target: "esp32p4"`) so
-   it participates in CI/manifest builds.
-5. **C6 slave image** — decide how it ships. Options: (a) document a manual
-   `esp-hosted` slave flash step, or (b) embed the slave `.bin` and add a P4-side
-   updater (GhostESP already has an OTA/updater pattern — see the Banshee C5
-   updater in `main/CMakeLists.txt` for how a second image is built and embedded).
+1. **`configs/sdkconfig.crowpanel_p4_9inch`** — new profile:
+   `CONFIG_IDF_TARGET_ESP32P4=y`, PSRAM on, OTA+SD partition table, screen at
+   1024×600, the DSI display option (§4), GT911 touch, GhostLink UART enabled.
+   Seed it from `boards/crowpanel_advanced_9inch_p4/sdkconfig.defaults` in this
+   repo, then flesh out with `idf.py set-target esp32p4 && idf.py menuconfig`.
+2. **`main/idf_component.yml`** — add `espressif/esp_wifi_remote` +
+   `espressif/esp_hosted` gated `target in ["esp32p4"]` **only if** you also want
+   the onboard-C6 station mode for the P4's own WebUI (Option A connectivity, no
+   custom RPC). Skip if the P4 is display-only. `elf_loader` already lists
+   `esp32p4`, so native SD apps should compile.
+3. **`main/CMakeLists.txt`** — a P4 branch: include the DSI display source,
+   exclude S3-only pieces (USB HID host, camera guards), and (if used) the
+   `esp_wifi_remote` glue.
+4. **`build.py`** — add the board (`idf_target: "esp32p4"`) so it builds in CI.
 
 ---
 
-## 5. Suggested phased plan
+## 6. Phased plan
 
-**Phase 0 — Prove the hardware path (no GhostESP yet).**
-Build a minimal ESP-IDF v6 app for the P4 that: flashes the C6 with esp-hosted
-slave firmware, brings up `esp_wifi_remote`, joins a WiFi network, and lights
-the DSI panel with an LVGL "hello". This de-risks the two hardest unknowns
-(hosted link + DSI timings) before touching GhostESP. Elecrow's factory sources
-+ `espressif/esp-hosted-mcu` examples are the references.
+**Phase 0 — Module first (fastest win).** Flash stock GhostESP onto the chosen
+WiFi module (C6/C5/S3). You now have a fully working GhostESP handheld on its
+own. Everything below just adds the big screen.
 
-**Phase 1 — GhostESP in connected mode.**
-Add the board profile (§4), get GhostESP to compile and boot for `esp32p4`,
-render its UI on the DSI panel, take touch input, and use **station-mode-only**
-features (WebUI, IP scanners, DNS sinkhole). Expect to `#ifdef`-guard or stub the
-promiscuous/injection call sites so it links. This yields a real, usable — if
-limited — GhostESP.
+**Phase 1 — P4 board bring-up.** Minimal ESP-IDF v6 P4 app: light the DSI panel
+with an LVGL "hello", read GT911 touch. De-risks the display, which is the P4's
+hardest unknown. (Elecrow factory source = known-good DSI timings.)
 
-**Phase 2 — CustomRpc: sniffing.**
-Port the `esp32p4-c6-wifi-test` CustomRpc promiscuous path: add RX-streaming
-opcodes to the C6 slave, add P4 client stubs that satisfy
-`esp_wifi_set_promiscuous` / `..._filter` and deliver frames to GhostESP's
-existing promiscuous callback. Unlocks scans, handshake/PMKID capture, monitors.
+**Phase 2 — GhostESP on the P4 in relay mode.** Add the board profile (§5), get
+GhostESP to compile/boot for `esp32p4`, render its UI on the panel, take touch,
+and drive the module over GhostLink UART (`commsend …`). Guard/stub the P4's
+*local* promiscuous/injection call sites so it links without a local radio.
+Result: full GhostESP features (executed on the module) on a 9" touchscreen.
 
-**Phase 3 — CustomRpc: injection.**
-Add the raw-TX opcode (`esp_wifi_80211_tx` executed on the C6). Unlocks the
-attack suite. Validate deauth/beacon spam against a lab AP you own.
+**Phase 3 — Optional P4 self-connectivity.** Wire `esp_wifi_remote` + the
+onboard C6 so the P4 can also join WiFi and host its own WebUI/AP (normal hosted
+path, no custom RPC). Nice-to-have.
 
-**Phase 4 — BLE, then polish.**
-Route BLE through hosted HCI (NimBLE host on P4, C6 controller) and adapt
-`ble_manager.c`. Then expansion modules (SX1262/nRF24 over the SPI bay), SD,
-battery, OTA for both images.
+**Phase 4 — Polish.** SD card, battery/RGB, OTA for the P4 image, expansion-bay
+modules (SX1262/nRF24 over the SPI bay), peer OTA to update the module from the
+P4 (GhostESP already has `peer_ota_manager`).
 
-Each phase is independently useful and independently shippable.
+Each phase is independently useful and shippable.
+
+> Note: Option A's custom-RPC work (making the P4 *itself* sniff/inject through
+> the onboard C6) is **deliberately not in this plan.** It's only worth doing if
+> you specifically need a single-chip P4 solution with no external module.
 
 ---
 
-## 6. Things you must verify on real hardware
+## 7. Verify on real hardware
 
-- **The C6↔P4 SDIO pins** (CLK/CMD/D0–D3) and the C6 reset/boot straps. These
-  are the single most important pins for WiFi and are **not** yet confirmed for
-  this board — get them from Elecrow's `Eagle_SCH&PCB` schematic. `pins.h` marks
-  them `TODO`.
-- **The DSI panel timings** (porches, lane rate, ILI9881C init) — copy from
-  Elecrow factory source, don't guess.
-- **GT911 I²C address at reset** — `0x5D` vs `0x14` depends on the INT pin level
-  during reset; the driver must drive the reset sequence accordingly.
-- Which GPIOs the replaceable-module bay actually exposes, and whether they
-  collide with SD or audio.
+- **GhostLink UART pins** on the P4 — pick two free GPIOs not used by DSI, touch,
+  SD, or audio; set via `commsetpins`. Recorded as `TODO` in `pins.h`.
+- **DSI panel timings / ILI9881C init** — copy from Elecrow factory source.
+- **GT911 I²C address at reset** — `0x5D` vs `0x14` depends on INT level during
+  reset; the driver must sequence reset accordingly.
+- **Onboard-C6 SDIO pins** (only if doing Phase 3) — read off Elecrow's
+  `Eagle_SCH&PCB` schematic; `TODO` in `pins.h`.
+- Which GPIOs the replaceable-module bay exposes and whether they collide with
+  SD/audio.
 
 ---
 
-## 7. References
+## 8. References
 
 - GhostESP — https://github.com/GhostESP-Revival/GhostESP
+- GhostLink (dual communication) — GhostESP docs `getting-started/dual-communication.md`
 - Elecrow CrowPanel 9" P4 board repo (schematic, factory source, examples) —
   https://github.com/Elecrow-RD/CrowPanel-Advanced-9inch-ESP32-P4-HMI-AI-Display-1024x600-IPS-Touch-Screen
-- esp-hosted-mcu (C6 slave firmware + host RPC) —
-  https://github.com/espressif/esp-hosted-mcu
-- ESP32-P4 + C6 CustomRpc promiscuous/injection proof of concept —
-  https://github.com/r4d10n/esp32p4-c6-wifi-test
+- esp-hosted-mcu (only for Option A / Phase 3) — https://github.com/espressif/esp-hosted-mcu
+- P4+C6 custom-RPC proof of concept (Option A only) — https://github.com/r4d10n/esp32p4-c6-wifi-test
 - ESP-IDF MIPI-DSI LCD docs — https://docs.espressif.com/projects/esp-idf/
