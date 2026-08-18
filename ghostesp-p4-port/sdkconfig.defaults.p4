@@ -15,7 +15,7 @@ CONFIG_SPIRAM_SPEED_200M=y
 
 # GhostESP board identity + screen
 CONFIG_BUILD_CONFIG_TEMPLATE="crowpanel_p4_9inch"
-CONFIG_WITH_SCREEN=n
+CONFIG_WITH_SCREEN=y
 CONFIG_TFT_WIDTH=1024
 CONFIG_TFT_HEIGHT=600
 
@@ -38,7 +38,7 @@ CONFIG_LV_COLOR_DEPTH_16=y
 # CONFIG_LV_COLOR_DEPTH_8 is not set
 # CONFIG_LV_COLOR_DEPTH_1 is not set
 CONFIG_LV_COLOR_DEPTH=16
-CONFIG_LV_COLOR_16_SWAP=y
+CONFIG_LV_COLOR_16_SWAP=n
 # CONFIG_LV_COLOR_SCREEN_TRANSP is not set
 CONFIG_LV_COLOR_MIX_ROUND_OFS=128
 CONFIG_LV_COLOR_CHROMA_KEY_HEX=0x00FF00
@@ -349,4 +349,12 @@ CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=8
 # Screen OFF for now: GhostESP display manager uses SPI/RGB drivers; the EK79007
 # MIPI-DSI panel needs a DSI path wired into GhostESP LVGL (next task). Headless
 # boot (serial CLI) confirms the core port is stable.
-CONFIG_WITH_SCREEN=n
+CONFIG_WITH_SCREEN=y
+
+# Re-enable screen: EK79007 DSI now wired into GhostESP display_manager.
+CONFIG_WITH_SCREEN=y
+# DSI panel takes native RGB565 byte order (no swap; swap is for the SPI panels)
+CONFIG_LV_COLOR_16_SWAP=n
+
+# Enable GhostESP touch polling (GT911 read wired in display_manager for P4)
+CONFIG_USE_TOUCHSCREEN=y

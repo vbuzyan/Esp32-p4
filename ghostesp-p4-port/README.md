@@ -9,10 +9,12 @@ serial (`help` lists wifi / ble / comm / capture / beacon / attack / … ).
 
 | Works now | Not yet |
 | --------- | ------- |
-| Full build + link for `esp32p4` | On-screen UI (EK79007 DSI not wired into GhostESP's LVGL — runs headless) |
-| Stable boot, "Ghost ESP INIT complete." | Local WiFi via onboard C6 (needs matching esp-hosted **slave firmware** on the C6) |
-| Interactive serial CLI (all command categories) | Local BLE (NimBLE host builds; controller is on the C6) |
-| GhostLink `comm` commands (drive an external radio module) | ESP-NOW / GTK-supplicant attacks (stubbed — run on the radio module) |
+| Full build + link for `esp32p4` | Local WiFi via onboard C6 (needs matching esp-hosted **slave firmware** on the C6) |
+| Stable boot, "Ghost ESP INIT complete." | Local BLE (NimBLE host builds; controller is on the C6) |
+| **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — run on the radio module) |
+| **GT911 touch** (interactive UI — Splash → Setup Wizard) | |
+| Interactive serial CLI (all command categories) | |
+| GhostLink `comm` commands (drive an external radio module) | |
 
 ## The 5 changes (see `ghostesp-esp32p4.patch`)
 

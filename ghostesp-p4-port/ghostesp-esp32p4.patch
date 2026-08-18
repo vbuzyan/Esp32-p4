@@ -1,8 +1,8 @@
 diff --git a/main/idf_component.yml b/main/idf_component.yml
-index cf59fdb..2cc957d 100644
+index cf59fdb..83e08bc 100644
 --- a/main/idf_component.yml
 +++ b/main/idf_component.yml
-@@ -22,3 +22,14 @@ dependencies:
+@@ -22,3 +22,24 @@ dependencies:
      version: ^1.3.1
      rules:
      - if: target in ["esp32", "esp32s2", "esp32s3", "esp32c6", "esp32c61", "esp32p4", "esp32c5"]
@@ -15,6 +15,16 @@ index cf59fdb..2cc957d 100644
 +    - if: target == "esp32p4"
 +  espressif/esp_hosted:
 +    version: "*"
++    rules:
++    - if: target == "esp32p4"
++  # EK79007 MIPI-DSI panel driver for the CrowPanel 9" P4 display.
++  espressif/esp_lcd_ek79007:
++    version: "^1.0.2"
++    rules:
++    - if: target == "esp32p4"
++  # GT911 capacitive touch for the CrowPanel 9" P4.
++  espressif/esp_lcd_touch_gt911:
++    version: "^1.1.3"
 +    rules:
 +    - if: target == "esp32p4"
 diff --git a/main/managers/ble_manager.c b/main/managers/ble_manager.c
@@ -44,6 +54,184 @@ index ba9bd73..f4de819 100644
  
          // log DMA-capable internal heap info right before NimBLE init
          size_t free_internal_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+diff --git a/main/managers/display_manager.c b/main/managers/display_manager.c
+index 4b24854..fc24385 100644
+--- a/main/managers/display_manager.c
++++ b/main/managers/display_manager.c
+@@ -456,6 +456,124 @@ static void gpio_isr_handler(void* arg) {
+ }
+ #endif
+ 
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++/* --- ESP32-P4 CrowPanel 9" V1.0: EK79007 MIPI-DSI panel -------------------
++ * GhostESP's stock display path (lvgl_esp32_drivers) only drives SPI/RGB
++ * panels; this board is MIPI-DSI. We bring the panel up directly with esp_lcd
++ * and feed GhostESP's LVGL flush via esp_lcd_panel_draw_bitmap, signaling
++ * flush-ready from the DPI DMA-completion callback (registered before the LVGL
++ * task starts — the ordering that esp_lvgl_port gets wrong on IDF 6.0.2). */
++#include "driver/gpio.h"
++#include "esp_ldo_regulator.h"
++#include "esp_lcd_mipi_dsi.h"
++#include "esp_lcd_panel_ops.h"
++#include "esp_lcd_ek79007.h"
++
++#define P4_LCD_H_RES 1024
++#define P4_LCD_V_RES 600
++#define P4_LCD_BLIGHT_GPIO 31
++static esp_lcd_panel_handle_t s_p4_panel = NULL;
++
++static bool p4_dsi_color_done(esp_lcd_panel_handle_t panel,
++                              esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
++    lv_disp_flush_ready((lv_disp_drv_t *)user_ctx);
++    return false;
++}
++
++static void p4_dsi_display_init(void) {
++    static esp_ldo_channel_handle_t ldo_phy = NULL, ldo_panel = NULL;
++    esp_ldo_channel_config_t phy = { .chan_id = 3, .voltage_mv = 2500 };  // DSI PHY
++    ESP_ERROR_CHECK(esp_ldo_acquire_channel(&phy, &ldo_phy));
++    esp_ldo_channel_config_t pan = { .chan_id = 4, .voltage_mv = 3300 };  // panel
++    ESP_ERROR_CHECK(esp_ldo_acquire_channel(&pan, &ldo_panel));
++
++    esp_lcd_dsi_bus_handle_t dsi_bus = NULL;
++    esp_lcd_dsi_bus_config_t bus_config = {
++        .bus_id = 0, .num_data_lanes = 2,
++        .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT, .lane_bit_rate_mbps = 900,
++    };
++    ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &dsi_bus));
++
++    esp_lcd_panel_io_handle_t dbi_io = NULL;
++    esp_lcd_dbi_io_config_t dbi_config = { .virtual_channel = 0, .lcd_cmd_bits = 8, .lcd_param_bits = 8 };
++    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(dsi_bus, &dbi_config, &dbi_io));
++
++    esp_lcd_dpi_panel_config_t dpi_config = {
++        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT, .dpi_clock_freq_mhz = 51,
++        .in_color_format = LCD_COLOR_FMT_RGB565, .out_color_format = LCD_COLOR_FMT_RGB565,
++        .num_fbs = 1,
++        .video_timing = { .h_size = P4_LCD_H_RES, .v_size = P4_LCD_V_RES,
++            .hsync_back_porch = 160, .hsync_pulse_width = 70, .hsync_front_porch = 160,
++            .vsync_back_porch = 23,  .vsync_pulse_width = 10, .vsync_front_porch = 12, },
++    };
++    ek79007_vendor_config_t vendor_config = { .mipi_config = { .dsi_bus = dsi_bus, .dpi_config = &dpi_config } };
++    esp_lcd_panel_dev_config_t panel_config = {
++        .reset_gpio_num = -1, .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
++        .bits_per_pixel = 16, .vendor_config = &vendor_config,
++    };
++    ESP_ERROR_CHECK(esp_lcd_new_panel_ek79007(dbi_io, &panel_config, &s_p4_panel));
++    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_p4_panel));
++    ESP_ERROR_CHECK(esp_lcd_panel_init(s_p4_panel));
++    ESP_ERROR_CHECK(esp_lcd_dpi_panel_enable_dma2d(s_p4_panel));
++
++    gpio_config_t bl = { .pin_bit_mask = 1ULL << P4_LCD_BLIGHT_GPIO, .mode = GPIO_MODE_OUTPUT };
++    gpio_config(&bl);
++    gpio_set_level(P4_LCD_BLIGHT_GPIO, 1);
++    ESP_LOGI(TAG, "P4 EK79007 DSI panel up (%dx%d)", P4_LCD_H_RES, P4_LCD_V_RES);
++}
++
++static void p4_dsi_register_flush_ready(lv_disp_drv_t *drv) {
++    esp_lcd_dpi_panel_event_callbacks_t cbs = { .on_color_trans_done = p4_dsi_color_done };
++    ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(s_p4_panel, &cbs, drv));
++}
++
++/* --- GT911 capacitive touch (feeds GhostESP's touch_data pipeline) --------- */
++#include "driver/i2c_master.h"
++#include "esp_lcd_touch_gt911.h"
++#define P4_TP_SCL 46
++#define P4_TP_SDA 45
++#define P4_TP_INT 42
++#define P4_TP_RST 40
++static esp_lcd_touch_handle_t s_p4_touch = NULL;
++
++static void p4_touch_init(void) {
++    i2c_master_bus_handle_t bus = NULL;
++    i2c_master_bus_config_t ic = {
++        .i2c_port = 0, .sda_io_num = P4_TP_SDA, .scl_io_num = P4_TP_SCL,
++        .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
++        .flags.enable_internal_pullup = true,
++    };
++    if (i2c_new_master_bus(&ic, &bus) != ESP_OK) { ESP_LOGE(TAG, "P4 touch I2C init failed"); return; }
++    esp_lcd_panel_io_handle_t tio = NULL;
++    esp_lcd_panel_io_i2c_config_t tcfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
++    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(bus, &tcfg, &tio));
++    esp_lcd_touch_config_t tp = {
++        .x_max = P4_LCD_H_RES, .y_max = P4_LCD_V_RES,
++        .rst_gpio_num = P4_TP_RST, .int_gpio_num = P4_TP_INT,
++        .levels = { .reset = 0, .interrupt = 0 },
++    };
++    if (esp_lcd_touch_new_i2c_gt911(tio, &tp, &s_p4_touch) != ESP_OK) {
++        tcfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP;
++        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(bus, &tcfg, &tio));
++        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_gt911(tio, &tp, &s_p4_touch));
++    }
++    ESP_LOGI(TAG, "P4 GT911 touch ready");
++}
++
++static void p4_gt911_read(lv_indev_data_t *data) {
++    uint16_t x = 0, y = 0, strength = 0; uint8_t n = 0;
++    if (s_p4_touch) {
++        esp_lcd_touch_read_data(s_p4_touch);
++        if (esp_lcd_touch_get_coordinates(s_p4_touch, &x, &y, &strength, &n, 1) && n > 0) {
++            data->state = LV_INDEV_STATE_PR;
++            data->point.x = x; data->point.y = y;
++            return;
++        }
++    }
++    data->state = LV_INDEV_STATE_REL;
++}
++#endif  /* CONFIG_IDF_TARGET_ESP32P4 */
++
+ static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
+                             lv_color_t *color_p) {
+     if (settings_get_invert_colors(&G_Settings)) {
+@@ -473,6 +591,10 @@ static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
+     m5stack_lvgl_render_callback(drv, area, color_p);
+ #elif defined(CONFIG_USE_TDISPLAY_S3)
+     i80_display_flush_cb(drv, area, color_p);
++#elif defined(CONFIG_IDF_TARGET_ESP32P4)
++    /* Copy the LVGL partial buffer into the DSI frame buffer; flush-ready is
++     * signaled from p4_dsi_color_done when the DMA2D transfer completes. */
++    esp_lcd_panel_draw_bitmap(s_p4_panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_p);
+ #else
+     disp_driver_flush(drv, area, color_p);
+ #endif
+@@ -1601,10 +1723,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+    * be initialized here or its device handle stays NULL and every read fails
+    * with "i2c handle not initialized". */
+   touch_driver_init();
++#elif defined(CONFIG_IDF_TARGET_ESP32P4)
++  p4_dsi_display_init();
++  p4_touch_init();
+ #else
+   lvgl_driver_init();
+ #endif
+-  ESP_LOGI(TAG, "display_manager: display driver init done, free internal RAM: %d bytes", 
++  ESP_LOGI(TAG, "display_manager: display driver init done, free internal RAM: %d bytes",
+            (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+ #endif // CONFIG_JC3248W535EN_LCD
+ 
+@@ -1719,7 +1844,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+   disp_drv.flush_cb = invert_flush_cb;
+   disp_drv.draw_buf = &disp_buf;
+   lv_disp_drv_register(&disp_drv);
+-  ESP_LOGI(TAG, "display_manager: display driver registered, free internal RAM: %d bytes", 
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++  /* Register the DPI DMA-completion callback now that disp_drv exists, so the
++   * very first flush can signal ready (avoids the esp_lvgl_port deadlock). */
++  p4_dsi_register_flush_ready(&disp_drv);
++#endif
++  ESP_LOGI(TAG, "display_manager: display driver registered, free internal RAM: %d bytes",
+            (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+ 
+ #elif defined(CONFIG_JC3248W535EN_LCD)
+@@ -3308,6 +3438,8 @@ void hardware_input_task(void *pvParameters) {
+ 
+ #ifdef CONFIG_JC3248W535EN_LCD
+     touch_driver_read_axs15231b(&touch_driver, &touch_data);
++#elif defined(CONFIG_IDF_TARGET_ESP32P4)
++    p4_gt911_read(&touch_data);
+ #else
+     touch_driver_read(&touch_driver, &touch_data);
+ #endif
 diff --git a/main/managers/wifi_manager.c b/main/managers/wifi_manager.c
 index ca49d59..f2c60dd 100644
 --- a/main/managers/wifi_manager.c
@@ -131,10 +319,10 @@ index 0000000..44f7b53
 +#endif /* CONFIG_IDF_TARGET_ESP32P4 */
 diff --git a/sdkconfig.defaults.p4 b/sdkconfig.defaults.p4
 new file mode 100644
-index 0000000..863a0ad
+index 0000000..5502747
 --- /dev/null
 +++ b/sdkconfig.defaults.p4
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,360 @@
 +# GhostESP board profile seed — CrowPanel 9" ESP32-P4 V1.0
 +CONFIG_IDF_TARGET="esp32p4"
 +CONFIG_IDF_TARGET_ESP32P4=y
@@ -152,7 +340,7 @@ index 0000000..863a0ad
 +
 +# GhostESP board identity + screen
 +CONFIG_BUILD_CONFIG_TEMPLATE="crowpanel_p4_9inch"
-+CONFIG_WITH_SCREEN=n
++CONFIG_WITH_SCREEN=y
 +CONFIG_TFT_WIDTH=1024
 +CONFIG_TFT_HEIGHT=600
 +
@@ -175,7 +363,7 @@ index 0000000..863a0ad
 +# CONFIG_LV_COLOR_DEPTH_8 is not set
 +# CONFIG_LV_COLOR_DEPTH_1 is not set
 +CONFIG_LV_COLOR_DEPTH=16
-+CONFIG_LV_COLOR_16_SWAP=y
++CONFIG_LV_COLOR_16_SWAP=n
 +# CONFIG_LV_COLOR_SCREEN_TRANSP is not set
 +CONFIG_LV_COLOR_MIX_ROUND_OFS=128
 +CONFIG_LV_COLOR_CHROMA_KEY_HEX=0x00FF00
@@ -486,4 +674,12 @@ index 0000000..863a0ad
 +# Screen OFF for now: GhostESP display manager uses SPI/RGB drivers; the EK79007
 +# MIPI-DSI panel needs a DSI path wired into GhostESP LVGL (next task). Headless
 +# boot (serial CLI) confirms the core port is stable.
-+CONFIG_WITH_SCREEN=n
++CONFIG_WITH_SCREEN=y
++
++# Re-enable screen: EK79007 DSI now wired into GhostESP display_manager.
++CONFIG_WITH_SCREEN=y
++# DSI panel takes native RGB565 byte order (no swap; swap is for the SPI panels)
++CONFIG_LV_COLOR_16_SWAP=n
++
++# Enable GhostESP touch polling (GT911 read wired in display_manager for P4)
++CONFIG_USE_TOUCHSCREEN=y
