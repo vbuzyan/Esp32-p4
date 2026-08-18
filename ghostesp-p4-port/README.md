@@ -9,13 +9,24 @@ serial (`help` lists wifi / ble / comm / capture / beacon / attack / … ).
 
 | Works now | Partly working / next |
 | --------- | ------- |
-| Full build + link for `esp32p4` | **WiFi via onboard C6**: SDIO transport + RPC connect, station/AP/DHCP init OK, but `scanap` hits `ESP_ERR_WIFI_STATE` — the C6 slave firmware (2.3.0) is **older than the host** (2.12.0); flash matching slave fw to fully fix |
+| Full build + link for `esp32p4` | **WiFi via onboard C6**: SDIO transport + RPC connect, station/AP/DHCP init OK, but `scanap` hits `ESP_ERR_WIFI_STATE` — a GhostESP WiFi mode/timing flow issue over the hosted link (**not** a firmware mismatch — see below), fix on the GhostESP side |
 | Stable boot, "Ghost ESP INIT complete." | BLE via C6 (HCI-over-SDIO advertised by the slave; not yet exercised) |
 | **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — the P4 build can't do these locally) |
 | **GT911 touch** (interactive UI — Splash → Setup Wizard) | |
 | Interactive serial CLI (all command categories) | |
 | **Onboard ESP32-C6 SDIO link up** (1-bit bus, reset GPIO32) | |
 | GhostLink `comm` commands (drive an external radio module) | |
+
+### C6 firmware is already current (verified)
+
+The GhostESP transport logs a "version mismatch: Host [2.12.0] > Co-proc [2.3.0]"
+warning, but that "2.3.0" is esp-hosted's **RPC protocol** version field, not the
+slave firmware version. Running esp-hosted's `host_performs_slave_ota` app and
+querying the C6 directly (`esp_hosted_get_coprocessor_fwversion`) reports the C6
+slave firmware is **already 2.12.12** — the same as the host component — so the
+OTA correctly skips. The `scanap` error is therefore a GhostESP-side flow issue
+over the higher-latency hosted link (it stops STA+AP then scans before the state
+settles), not something a C6 reflash fixes.
 
 ### The C6 SDIO wiring (CrowPanel V1.0, from Elecrow's working WiFi lesson)
 
