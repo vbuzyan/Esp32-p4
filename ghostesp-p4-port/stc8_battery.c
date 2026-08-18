@@ -25,7 +25,8 @@ static bool rd(uint8_t reg, uint8_t *out)
     return i2c_master_transmit_receive(s_dev, &reg, 1, out, 1, 100) == ESP_OK;
 }
 
-bool stc8_battery_read(uint8_t *percent, uint16_t *millivolts, bool *charging)
+bool stc8_battery_read(uint8_t *percent, uint16_t *millivolts,
+                       bool *charging, bool *present)
 {
     if (!s_dev) return false;
 
@@ -33,15 +34,19 @@ bool stc8_battery_read(uint8_t *percent, uint16_t *millivolts, bool *charging)
     if (!rd(0x08, &v)) return false;          /* percentage anchors the read */
     if (percent) *percent = (v > 100) ? 100 : v;
 
-    if (millivolts) {
-        uint8_t lo, hi;
-        if (rd(0x04, &lo) && rd(0x05, &hi))
-            *millivolts = (uint16_t)lo | ((uint16_t)hi << 8);
-    }
-    if (charging) {
-        uint8_t c = 0;
-        rd(0x09, &c);
-        *charging = (c != 0);
-    }
+    uint16_t mv = 0;
+    uint8_t lo, hi;
+    if (rd(0x04, &lo) && rd(0x05, &hi))
+        mv = (uint16_t)lo | ((uint16_t)hi << 8);
+    if (millivolts) *millivolts = mv;
+
+    uint8_t c = 0;
+    rd(0x09, &c);                             /* 0x01=charging, 0x02=no-batt/idle */
+    if (charging) *charging = (c == 0x01);
+
+    /* No battery: VBAT floats to the charger output (~4.5-4.6 V, and the flag
+     * reads 0x02) — well above any real LiPo. Report absent so callers don't
+     * show a bogus 100 %. */
+    if (present) *present = (mv > 0 && mv <= 4300);
     return true;
 }

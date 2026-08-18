@@ -99,7 +99,7 @@ index ba9bd73..2e84439 100644
          if (ret != 0) {
              ESP_LOGE(TAG_BLE, "Failed to init nimble port: %d", ret);
 diff --git a/main/managers/display_manager.c b/main/managers/display_manager.c
-index 4b24854..f1d39b4 100644
+index 4b24854..c2b0afa 100644
 --- a/main/managers/display_manager.c
 +++ b/main/managers/display_manager.c
 @@ -456,6 +456,155 @@ static void gpio_isr_handler(void* arg) {
@@ -237,7 +237,7 @@ index 4b24854..f1d39b4 100644
 +    }
 +    reg = 0x09;
 +    if (charging && i2c_master_transmit_receive(s_p4_stc8, &reg, 1, &v, 1, 100) == ESP_OK)
-+        *charging = (v != 0);
++        *charging = (v == 0x01);   /* 0x01=charging, 0x02=no-battery/idle */
 +    return true;
 +}
 +
@@ -269,7 +269,7 @@ index 4b24854..f1d39b4 100644
  #else
      disp_driver_flush(drv, area, color_p);
  #endif
-@@ -803,12 +956,34 @@ bool isCharging() { return _isCharging; }
+@@ -803,12 +956,40 @@ bool isCharging() { return _isCharging; }
   * @param is_charging Pointer to store charging status
   * @return true if battery data is available, false otherwise
   */
@@ -294,6 +294,12 @@ index 4b24854..f1d39b4 100644
 +                ESP_LOGI(TAG, "STC8 battery @0x2F: %u%%, %umV, charging=%s",
 +                         pct, mv, chg ? "yes" : "no");
 +            }
++            // No battery: VBAT floats to the charger output (~4.4-4.6V), above
++            // any real LiPo (<=~4.25V). Treat >4300mV as "no battery" so the UI
++            // doesn't show a bogus 100%.
++            if (mv > 4300) {
++                return false;
++            }
 +            *percentage = pct;
 +            *is_charging = chg;
 +            return true;
@@ -304,7 +310,7 @@ index 4b24854..f1d39b4 100644
      // Cache for non-fuel-gauge configurations to avoid I2C access in low mode
      static uint8_t last_pct_cache = 0;
      static bool last_chg_cache = false;
-@@ -1601,10 +1776,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+@@ -1601,10 +1782,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
     * be initialized here or its device handle stays NULL and every read fails
     * with "i2c handle not initialized". */
    touch_driver_init();
@@ -319,7 +325,7 @@ index 4b24854..f1d39b4 100644
             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
  #endif // CONFIG_JC3248W535EN_LCD
  
-@@ -1719,7 +1897,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+@@ -1719,7 +1903,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
    disp_drv.flush_cb = invert_flush_cb;
    disp_drv.draw_buf = &disp_buf;
    lv_disp_drv_register(&disp_drv);
@@ -333,7 +339,7 @@ index 4b24854..f1d39b4 100644
             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
  
  #elif defined(CONFIG_JC3248W535EN_LCD)
-@@ -3308,6 +3491,8 @@ void hardware_input_task(void *pvParameters) {
+@@ -3308,6 +3497,8 @@ void hardware_input_task(void *pvParameters) {
  
  #ifdef CONFIG_JC3248W535EN_LCD
      touch_driver_read_axs15231b(&touch_driver, &touch_data);

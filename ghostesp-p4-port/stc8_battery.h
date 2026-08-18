@@ -14,11 +14,13 @@
  *
  *   0x08        battery percentage, 0-100            (uint8)
  *   0x04, 0x05  battery voltage in millivolts, LE    (uint16, lo=0x04 hi=0x05)
- *   0x09        charging flag (non-zero = charging)  (uint8)
+ *   0x09, 0x0A  charge-state flag: 0x01 = charging, 0x02 = no battery / idle
  *   0x00, 0x01  aux / raw-ADC value, LE              (uint16) [tracks charge]
- *   0x0A        second charge-status flag (CHG/DONE) [semantics unconfirmed]
  *
- * Verified live: 87 %, 4115 mV, charging — values climb together while charging.
+ * Verified live: with a pack -> 87 %, 4115 mV, flag 0x01 (charging), values
+ * climb together while charging. Battery removed -> 100 %, ~4581 mV, flag 0x02
+ * (VBAT floats to the charger output). So >4300 mV (or flag 0x02 at high mV)
+ * means "no battery" — otherwise 0x08 would falsely read 100 %.
  *
  * Notes:
  *  - LDO4 (3.3 V) powers the I2C pull-ups on this board; make sure it's on.
@@ -37,7 +39,9 @@
 esp_err_t stc8_battery_init(i2c_master_bus_handle_t bus);
 
 /* Read battery state. Any out-pointer may be NULL. Returns true on success.
- *   percent    : 0-100
+ *   percent    : 0-100 (only meaningful when present)
  *   millivolts : pack voltage in mV (e.g. 4115)
- *   charging   : true while charging */
-bool stc8_battery_read(uint8_t *percent, uint16_t *millivolts, bool *charging);
+ *   charging   : true while charging (flag 0x01)
+ *   present    : false if no battery is installed (VBAT floats > 4300 mV) */
+bool stc8_battery_read(uint8_t *percent, uint16_t *millivolts,
+                       bool *charging, bool *present);
