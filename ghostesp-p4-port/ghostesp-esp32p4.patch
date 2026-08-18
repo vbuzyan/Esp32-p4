@@ -55,10 +55,10 @@ index ba9bd73..f4de819 100644
          // log DMA-capable internal heap info right before NimBLE init
          size_t free_internal_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
 diff --git a/main/managers/display_manager.c b/main/managers/display_manager.c
-index 4b24854..fc24385 100644
+index 4b24854..ac69986 100644
 --- a/main/managers/display_manager.c
 +++ b/main/managers/display_manager.c
-@@ -456,6 +456,124 @@ static void gpio_isr_handler(void* arg) {
+@@ -456,6 +456,122 @@ static void gpio_isr_handler(void* arg) {
  }
  #endif
  
@@ -121,10 +121,8 @@ index 4b24854..fc24385 100644
 +    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_p4_panel));
 +    ESP_ERROR_CHECK(esp_lcd_panel_init(s_p4_panel));
 +    ESP_ERROR_CHECK(esp_lcd_dpi_panel_enable_dma2d(s_p4_panel));
-+
-+    gpio_config_t bl = { .pin_bit_mask = 1ULL << P4_LCD_BLIGHT_GPIO, .mode = GPIO_MODE_OUTPUT };
-+    gpio_config(&bl);
-+    gpio_set_level(P4_LCD_BLIGHT_GPIO, 1);
++    // Backlight (GPIO31) is driven by GhostESP's backlight manager via
++    // CONFIG_LV_DISP_PIN_BCKL=31; GPIO32 is left free for the C6 SDIO reset.
 +    ESP_LOGI(TAG, "P4 EK79007 DSI panel up (%dx%d)", P4_LCD_H_RES, P4_LCD_V_RES);
 +}
 +
@@ -183,7 +181,7 @@ index 4b24854..fc24385 100644
  static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
                              lv_color_t *color_p) {
      if (settings_get_invert_colors(&G_Settings)) {
-@@ -473,6 +591,10 @@ static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
+@@ -473,6 +589,10 @@ static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
      m5stack_lvgl_render_callback(drv, area, color_p);
  #elif defined(CONFIG_USE_TDISPLAY_S3)
      i80_display_flush_cb(drv, area, color_p);
@@ -194,7 +192,7 @@ index 4b24854..fc24385 100644
  #else
      disp_driver_flush(drv, area, color_p);
  #endif
-@@ -1601,10 +1723,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+@@ -1601,10 +1721,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
     * be initialized here or its device handle stays NULL and every read fails
     * with "i2c handle not initialized". */
    touch_driver_init();
@@ -209,7 +207,7 @@ index 4b24854..fc24385 100644
             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
  #endif // CONFIG_JC3248W535EN_LCD
  
-@@ -1719,7 +1844,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+@@ -1719,7 +1842,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
    disp_drv.flush_cb = invert_flush_cb;
    disp_drv.draw_buf = &disp_buf;
    lv_disp_drv_register(&disp_drv);
@@ -223,7 +221,7 @@ index 4b24854..fc24385 100644
             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
  
  #elif defined(CONFIG_JC3248W535EN_LCD)
-@@ -3308,6 +3438,8 @@ void hardware_input_task(void *pvParameters) {
+@@ -3308,6 +3436,8 @@ void hardware_input_task(void *pvParameters) {
  
  #ifdef CONFIG_JC3248W535EN_LCD
      touch_driver_read_axs15231b(&touch_driver, &touch_data);
@@ -233,25 +231,27 @@ index 4b24854..fc24385 100644
      touch_driver_read(&touch_driver, &touch_data);
  #endif
 diff --git a/main/managers/wifi_manager.c b/main/managers/wifi_manager.c
-index ca49d59..f2c60dd 100644
+index ca49d59..ad00a7a 100644
 --- a/main/managers/wifi_manager.c
 +++ b/main/managers/wifi_manager.c
-@@ -2403,7 +2403,21 @@ void wifi_manager_init(void) {
+@@ -2403,7 +2403,23 @@ void wifi_manager_init(void) {
      wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
  
      ESP_LOGI(TAG, "wifi_manager: initializing WiFi driver...");
 +#if defined(CONFIG_IDF_TARGET_ESP32P4)
-+    // ESP32-P4 has no local radio; WiFi comes from the onboard ESP32-C6 over
-+    // esp-hosted. When the C6 slave link isn't up (no/mismatched slave firmware),
-+    // esp_wifi_init drives the hosted SDIO transport into a retry loop that ends
-+    // in a chip reset — so skip local WiFi init entirely on P4. GhostESP runs as
-+    // the display/relay front-end and drives a GhostLink radio module instead.
-+    // (Phase 3: once the C6 runs matching esp-hosted slave firmware, gate this on
-+    // a hosted-link-up check and let esp_wifi_init run for real WiFi via the C6.)
-+    (void)cfg;
-+    ESP_LOGW(TAG, "wifi_manager: skipping local WiFi init on ESP32-P4 (no C6 link). "
-+                  "Radio runs on the GhostLink module; P4 is the display/relay front-end.");
-+    return;
++    // ESP32-P4: WiFi comes from the onboard ESP32-C6 over esp-hosted (SDIO link
++    // configured for the CrowPanel V1.0: 1-bit bus, reset GPIO32). If the C6
++    // slave doesn't respond, esp_wifi_init fails — log and continue headless
++    // rather than aborting (GhostLink module remains an option).
++    {
++        esp_err_t wifi_init_err = esp_wifi_init(&cfg);
++        if (wifi_init_err != ESP_OK) {
++            ESP_LOGW(TAG, "wifi_manager: WiFi init via C6 failed (%s) — continuing "
++                          "without local radio.", esp_err_to_name(wifi_init_err));
++            return;
++        }
++        ESP_LOGI(TAG, "wifi_manager: WiFi init via onboard C6 (esp-hosted) OK");
++    }
 +#else
      ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 +#endif
@@ -319,10 +319,10 @@ index 0000000..44f7b53
 +#endif /* CONFIG_IDF_TARGET_ESP32P4 */
 diff --git a/sdkconfig.defaults.p4 b/sdkconfig.defaults.p4
 new file mode 100644
-index 0000000..5502747
+index 0000000..5c5a1eb
 --- /dev/null
 +++ b/sdkconfig.defaults.p4
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,375 @@
 +# GhostESP board profile seed — CrowPanel 9" ESP32-P4 V1.0
 +CONFIG_IDF_TARGET="esp32p4"
 +CONFIG_IDF_TARGET_ESP32P4=y
@@ -683,3 +683,18 @@ index 0000000..5502747
 +
 +# Enable GhostESP touch polling (GT911 read wired in display_manager for P4)
 +CONFIG_USE_TOUCHSCREEN=y
++
++# --- Onboard ESP32-C6 WiFi via esp-hosted (Elecrow V1.0 verified wiring) ---
++# Backlight is GPIO31 (not GhostESP's default 32); GPIO32 is the C6 SDIO reset.
++CONFIG_LV_DISP_PIN_BCKL=31
++# esp-hosted SDIO link to the C6 — values from Elecrow's working WiFi lesson:
++CONFIG_ESP_HOSTED_SDIO_1_BIT_BUS=y
++CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH=1
++CONFIG_ESP_HOSTED_SDIO_PIN_CLK=18
++CONFIG_ESP_HOSTED_SDIO_PIN_CMD=19
++CONFIG_ESP_HOSTED_SDIO_PIN_D0=14
++CONFIG_ESP_HOSTED_SDIO_PIN_D1=15
++CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=32
++CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
++CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS=1500
++CONFIG_ESP_HOSTED_SLAVE_RESET_ON_EVERY_HOST_BOOTUP=y

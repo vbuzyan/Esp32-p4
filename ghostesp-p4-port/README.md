@@ -7,14 +7,21 @@ serial (`help` lists wifi / ble / comm / capture / beacon / attack / … ).
 
 ## Status
 
-| Works now | Not yet |
+| Works now | Partly working / next |
 | --------- | ------- |
-| Full build + link for `esp32p4` | Local WiFi via onboard C6 (needs matching esp-hosted **slave firmware** on the C6) |
-| Stable boot, "Ghost ESP INIT complete." | Local BLE (NimBLE host builds; controller is on the C6) |
-| **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — run on the radio module) |
+| Full build + link for `esp32p4` | **WiFi via onboard C6**: SDIO transport + RPC connect, station/AP/DHCP init OK, but `scanap` hits `ESP_ERR_WIFI_STATE` — the C6 slave firmware (2.3.0) is **older than the host** (2.12.0); flash matching slave fw to fully fix |
+| Stable boot, "Ghost ESP INIT complete." | BLE via C6 (HCI-over-SDIO advertised by the slave; not yet exercised) |
+| **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — the P4 build can't do these locally) |
 | **GT911 touch** (interactive UI — Splash → Setup Wizard) | |
 | Interactive serial CLI (all command categories) | |
+| **Onboard ESP32-C6 SDIO link up** (1-bit bus, reset GPIO32) | |
 | GhostLink `comm` commands (drive an external radio module) | |
+
+### The C6 SDIO wiring (CrowPanel V1.0, from Elecrow's working WiFi lesson)
+
+1-bit SDIO, slot 1, 40 MHz: **CLK 18, CMD 19, D0 14, D1 15, reset (active-high) GPIO 32**,
+reset delay 1500 ms. Backlight is **GPIO 31** (GhostESP's default 32 collides with
+the C6 reset — the board profile moves it to 31).
 
 ## The 5 changes (see `ghostesp-esp32p4.patch`)
 
