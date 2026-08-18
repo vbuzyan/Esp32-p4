@@ -99,10 +99,10 @@ index ba9bd73..2e84439 100644
          if (ret != 0) {
              ESP_LOGE(TAG_BLE, "Failed to init nimble port: %d", ret);
 diff --git a/main/managers/display_manager.c b/main/managers/display_manager.c
-index 4b24854..ac69986 100644
+index 4b24854..f1d39b4 100644
 --- a/main/managers/display_manager.c
 +++ b/main/managers/display_manager.c
-@@ -456,6 +456,122 @@ static void gpio_isr_handler(void* arg) {
+@@ -456,6 +456,155 @@ static void gpio_isr_handler(void* arg) {
  }
  #endif
  
@@ -183,18 +183,18 @@ index 4b24854..ac69986 100644
 +#define P4_TP_INT 42
 +#define P4_TP_RST 40
 +static esp_lcd_touch_handle_t s_p4_touch = NULL;
++static i2c_master_bus_handle_t s_p4_i2c_bus = NULL;   /* shared GT911 + STC8 bus */
 +
 +static void p4_touch_init(void) {
-+    i2c_master_bus_handle_t bus = NULL;
 +    i2c_master_bus_config_t ic = {
 +        .i2c_port = 0, .sda_io_num = P4_TP_SDA, .scl_io_num = P4_TP_SCL,
 +        .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
 +        .flags.enable_internal_pullup = true,
 +    };
-+    if (i2c_new_master_bus(&ic, &bus) != ESP_OK) { ESP_LOGE(TAG, "P4 touch I2C init failed"); return; }
++    if (i2c_new_master_bus(&ic, &s_p4_i2c_bus) != ESP_OK) { ESP_LOGE(TAG, "P4 touch I2C init failed"); return; }
 +    esp_lcd_panel_io_handle_t tio = NULL;
 +    esp_lcd_panel_io_i2c_config_t tcfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
-+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(bus, &tcfg, &tio));
++    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_p4_i2c_bus, &tcfg, &tio));
 +    esp_lcd_touch_config_t tp = {
 +        .x_max = P4_LCD_H_RES, .y_max = P4_LCD_V_RES,
 +        .rst_gpio_num = P4_TP_RST, .int_gpio_num = P4_TP_INT,
@@ -202,10 +202,43 @@ index 4b24854..ac69986 100644
 +    };
 +    if (esp_lcd_touch_new_i2c_gt911(tio, &tp, &s_p4_touch) != ESP_OK) {
 +        tcfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP;
-+        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(bus, &tcfg, &tio));
++        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_p4_i2c_bus, &tcfg, &tio));
 +        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_gt911(tio, &tp, &s_p4_touch));
 +    }
 +    ESP_LOGI(TAG, "P4 GT911 touch ready");
++}
++
++/* --- STC8H1K08 (U14) battery co-processor: I2C slave @ 0x2F on the GT911 bus.
++ * Decoded register map (see ghostesp-p4-port): 0x08 = percent (0-100),
++ * 0x04/0x05 = voltage mV (uint16 LE), 0x09 = charging flag. */
++#define P4_STC8_ADDR   0x2F
++static i2c_master_dev_handle_t s_p4_stc8 = NULL;
++
++bool p4_stc8_battery_read(uint8_t *percent, uint16_t *millivolts, bool *charging) {
++    if (!s_p4_i2c_bus) return false;
++    if (!s_p4_stc8) {
++        i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7,
++                                   .device_address = P4_STC8_ADDR, .scl_speed_hz = 100000 };
++        if (i2c_master_bus_add_device(s_p4_i2c_bus, &dc, &s_p4_stc8) != ESP_OK) return false;
++    }
++    /* This STC8 firmware doesn't auto-increment on multi-byte reads, so read
++     * each register with its own write-reg/read-byte transaction. */
++    uint8_t reg, v, lo = 0, hi = 0;
++    reg = 0x08;
++    if (i2c_master_transmit_receive(s_p4_stc8, &reg, 1, &v, 1, 100) != ESP_OK) return false;
++    if (percent) *percent = (v > 100) ? 100 : v;
++    if (millivolts) {
++        reg = 0x04;
++        if (i2c_master_transmit_receive(s_p4_stc8, &reg, 1, &lo, 1, 100) == ESP_OK) {
++            reg = 0x05;
++            if (i2c_master_transmit_receive(s_p4_stc8, &reg, 1, &hi, 1, 100) == ESP_OK)
++                *millivolts = (uint16_t)lo | ((uint16_t)hi << 8);
++        }
++    }
++    reg = 0x09;
++    if (charging && i2c_master_transmit_receive(s_p4_stc8, &reg, 1, &v, 1, 100) == ESP_OK)
++        *charging = (v != 0);
++    return true;
 +}
 +
 +static void p4_gt911_read(lv_indev_data_t *data) {
@@ -225,7 +258,7 @@ index 4b24854..ac69986 100644
  static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
                              lv_color_t *color_p) {
      if (settings_get_invert_colors(&G_Settings)) {
-@@ -473,6 +589,10 @@ static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
+@@ -473,6 +622,10 @@ static void invert_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
      m5stack_lvgl_render_callback(drv, area, color_p);
  #elif defined(CONFIG_USE_TDISPLAY_S3)
      i80_display_flush_cb(drv, area, color_p);
@@ -236,7 +269,42 @@ index 4b24854..ac69986 100644
  #else
      disp_driver_flush(drv, area, color_p);
  #endif
-@@ -1601,10 +1721,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+@@ -803,12 +956,34 @@ bool isCharging() { return _isCharging; }
+  * @param is_charging Pointer to store charging status
+  * @return true if battery data is available, false otherwise
+  */
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++bool p4_stc8_battery_read(uint8_t *percent, uint16_t *millivolts, bool *charging);
++#endif
++
+ static bool get_battery_info(uint8_t *percentage, bool *is_charging) {
+     bool result = false;
+     if (!percentage || !is_charging) {
+         return result;
+     }
+ 
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++    // CrowPanel P4: battery is read from the STC8H1K08 co-processor over I2C.
++    {
++        uint8_t pct = 0; uint16_t mv = 0; bool chg = false;
++        if (p4_stc8_battery_read(&pct, &mv, &chg)) {
++            static bool logged_once = false;
++            if (!logged_once) {
++                logged_once = true;
++                ESP_LOGI(TAG, "STC8 battery @0x2F: %u%%, %umV, charging=%s",
++                         pct, mv, chg ? "yes" : "no");
++            }
++            *percentage = pct;
++            *is_charging = chg;
++            return true;
++        }
++    }
++#endif
++
+     // Cache for non-fuel-gauge configurations to avoid I2C access in low mode
+     static uint8_t last_pct_cache = 0;
+     static bool last_chg_cache = false;
+@@ -1601,10 +1776,13 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
     * be initialized here or its device handle stays NULL and every read fails
     * with "i2c handle not initialized". */
    touch_driver_init();
@@ -251,7 +319,7 @@ index 4b24854..ac69986 100644
             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
  #endif // CONFIG_JC3248W535EN_LCD
  
-@@ -1719,7 +1842,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
+@@ -1719,7 +1897,12 @@ ESP_LOGI(TAG, "T-Deck trackball ISRs registered");
    disp_drv.flush_cb = invert_flush_cb;
    disp_drv.draw_buf = &disp_buf;
    lv_disp_drv_register(&disp_drv);
@@ -265,7 +333,7 @@ index 4b24854..ac69986 100644
             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
  
  #elif defined(CONFIG_JC3248W535EN_LCD)
-@@ -3308,6 +3436,8 @@ void hardware_input_task(void *pvParameters) {
+@@ -3308,6 +3491,8 @@ void hardware_input_task(void *pvParameters) {
  
  #ifdef CONFIG_JC3248W535EN_LCD
      touch_driver_read_axs15231b(&touch_driver, &touch_data);

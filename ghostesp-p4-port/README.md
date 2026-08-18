@@ -13,12 +13,32 @@ serial (`help` lists wifi / ble / comm / capture / beacon / attack / … ).
 | Stable boot, "Ghost ESP INIT complete." | Raw sniffing/capture returns nothing (promiscuous is a safe no-op on hosted) |
 | **BLE via the C6** (VHCI HCI-over-SDIO): scan / AirTag / spam init & run | |
 | **No crashes**: deauth/beacon/capture/monitor run harmlessly instead of panicking | |
+| **Battery gauge** via the STC8H1K08 co-processor (%/voltage/charging in the UI) | |
 | **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — the P4 build can't do these locally) |
 | **GT911 touch** (interactive UI — Splash → Setup Wizard) | |
 | Interactive serial CLI (all command categories) | |
 | **Onboard ESP32-C6 SDIO link up** (1-bit bus, reset GPIO32) | |
 | **WiFi scanning via the C6** (`scanap` → real APs) | |
 | GhostLink `comm` commands (drive an external radio module) | |
+
+### Battery (STC8H1K08 co-processor)
+
+The board has an **STC8H1K08-36I** (schematic U14) that measures the battery and
+charge status and presents them as an **I2C slave at address `0x2F`** on the
+GT911 touch bus (SDA=45/SCL=46). Reverse-engineered register map (read each
+register in its own write-reg/read-byte transaction — no auto-increment):
+
+| Register | Meaning |
+| --- | --- |
+| `0x08` | battery percentage 0–100 |
+| `0x04`/`0x05` | voltage in mV, uint16 little-endian (e.g. 4115 = 4.12 V) |
+| `0x09` | charging flag (non-zero = charging) |
+| `0x00`/`0x01` | aux / raw ADC (climbs with charge) |
+
+Verified live: `87%, 4115mV, charging=yes`. Standalone driver in
+[`stc8_battery.h`](stc8_battery.h) / [`stc8_battery.c`](stc8_battery.c); GhostESP
+integrates the same read in `display_manager.c` (`p4_stc8_battery_read` →
+`get_battery_info`) so the battery shows in the UI.
 
 ### BLE + WiFi crash fixes
 
