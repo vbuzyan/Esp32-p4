@@ -1,0 +1,34 @@
+# Board bring-up defaults — CrowPanel 9" ESP32-P4.
+CONFIG_IDF_TARGET="esp32p4"
+
+# 16 MB flash (CrowPanel Advanced 9" V1.0).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# This board is early P4 silicon (rev v1.3, per esptool). IDF 6.0.2 defaults to
+# rev v3.1 and treats <3.0 vs >=3.0 as mutually exclusive, so we must opt into
+# the <3.0 family and set the minimum to v1.0.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# PSRAM: needed for a 1024x600 framebuffer (1024*600*2 = ~1.2 MB).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+
+# NOTE: do NOT enable CONFIG_LCD_DSI_ISR_IRAM_SAFE — it forces the DSI vsync
+# callback into IRAM, but esp_lvgl_port's callback isn't IRAM-placed, so the
+# avoid_tearing registration fails and the LVGL task spins into a watchdog reset.
+
+# Larger main task stack for panel init.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Console on the default UART so `idf.py monitor` shows touch logs.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Single-app partition layout (bring-up only).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

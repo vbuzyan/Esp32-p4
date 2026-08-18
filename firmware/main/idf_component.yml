@@ -1,0 +1,8 @@
+## Managed component dependencies — CrowPanel P4 V1.0 (LVGL UI demo).
+## Direct LVGL v8 integration (no esp_lvgl_port — its DSI path deadlocks on
+## IDF 6.0.2). Panel/touch drivers mirror Elecrow's V1.0 factory lessons.
+dependencies:
+  idf: ">=5.4.2"
+  espressif/esp_lcd_ek79007: "^1.0.2"
+  espressif/esp_lcd_touch_gt911: "^1.1.3"
+  lvgl/lvgl: "^8.3.11"
