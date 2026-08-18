@@ -10,13 +10,32 @@ serial (`help` lists wifi / ble / comm / capture / beacon / attack / … ).
 | Works now | Partly working / next |
 | --------- | ------- |
 | Full build + link for `esp32p4` | Raw-injection attacks (deauth / beacon spam / etc.) — need `esp_wifi_80211_tx`, which esp-hosted doesn't forward; these run on a GhostLink module, not the P4's C6 |
-| Stable boot, "Ghost ESP INIT complete." | BLE via C6 (HCI-over-SDIO advertised by the slave; not yet exercised) |
+| Stable boot, "Ghost ESP INIT complete." | Raw sniffing/capture returns nothing (promiscuous is a safe no-op on hosted) |
+| **BLE via the C6** (VHCI HCI-over-SDIO): scan / AirTag / spam init & run | |
+| **No crashes**: deauth/beacon/capture/monitor run harmlessly instead of panicking | |
 | **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — the P4 build can't do these locally) |
 | **GT911 touch** (interactive UI — Splash → Setup Wizard) | |
 | Interactive serial CLI (all command categories) | |
 | **Onboard ESP32-C6 SDIO link up** (1-bit bus, reset GPIO32) | |
 | **WiFi scanning via the C6** (`scanap` → real APs) | |
 | GhostLink `comm` commands (drive an external radio module) | |
+
+### BLE + WiFi crash fixes
+
+- **BLE:** GhostESP defaulted NimBLE to a UART HCI transport, which aborts on P4
+  ("UART driver already installed"). Fixed by routing NimBLE over esp-hosted's
+  **VHCI** (`BT_NIMBLE_TRANSPORT_UART=n`, `ESP_HOSTED_ENABLE_BT_NIMBLE=y`,
+  `ESP_HOSTED_NIMBLE_HCI_VHCI=y`) **and** enabling the C6's BT controller from
+  the host (`esp_hosted_bt_controller_init()` + `..._enable()` before
+  `nimble_port_init()`), or HCI commands get no ack. BLE scan/AirTag/spam now run.
+- **WiFi:** promiscuous mode and `esp_wifi_80211_tx` aren't forwarded by
+  esp-hosted and **panic** the transport if called (deauth/capture/monitor).
+  Link-wrapped them (`-Wl,--wrap=...` in CMakeLists → stubs in
+  `p4_radio_stubs.c`) to return **ESP_OK** and no-op — GhostESP wraps these in
+  `ESP_ERROR_CHECK()`, so they must not error. Also link-wrapped
+  `esp_wifi_set_mode` with a retry on `ESP_ERR_WIFI_NOT_STARTED` (the same hosted
+  async-state race), which was aborting attack setup. Result: every WiFi feature
+  runs without crashing; the radio-level ones simply do nothing (hosted limit).
 
 ### The scanap fix
 
