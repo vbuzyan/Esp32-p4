@@ -9,13 +9,23 @@ serial (`help` lists wifi / ble / comm / capture / beacon / attack / … ).
 
 | Works now | Partly working / next |
 | --------- | ------- |
-| Full build + link for `esp32p4` | **WiFi via onboard C6**: SDIO transport + RPC connect, station/AP/DHCP init OK, but `scanap` hits `ESP_ERR_WIFI_STATE` — a GhostESP WiFi mode/timing flow issue over the hosted link (**not** a firmware mismatch — see below), fix on the GhostESP side |
+| Full build + link for `esp32p4` | Raw-injection attacks (deauth / beacon spam / etc.) — need `esp_wifi_80211_tx`, which esp-hosted doesn't forward; these run on a GhostLink module, not the P4's C6 |
 | Stable boot, "Ghost ESP INIT complete." | BLE via C6 (HCI-over-SDIO advertised by the slave; not yet exercised) |
 | **On-screen GhostESP UI** on the 1024×600 EK79007 MIPI-DSI panel | ESP-NOW / GTK-supplicant attacks (stubbed — the P4 build can't do these locally) |
 | **GT911 touch** (interactive UI — Splash → Setup Wizard) | |
 | Interactive serial CLI (all command categories) | |
 | **Onboard ESP32-C6 SDIO link up** (1-bit bus, reset GPIO32) | |
+| **WiFi scanning via the C6** (`scanap` → real APs) | |
 | GhostLink `comm` commands (drive an external radio module) | |
+
+### The scanap fix
+
+Over esp-hosted, `esp_wifi_start()` returns before the C6 station reaches
+STARTED (the event comes back async over RPC), so scanning immediately failed
+with `ESP_ERR_WIFI_STATE`. `ap_scan.c` now, on P4, waits 300 ms after start and
+retries `esp_wifi_scan_start` on `ESP_ERR_WIFI_STATE` (up to ~3 s). Result:
+`scanap` finds real networks. Connected-mode WiFi features (scan, join, IP-layer
+recon) work over the C6; only raw-injection attacks don't (hosted limitation).
 
 ### C6 firmware is already current (verified)
 

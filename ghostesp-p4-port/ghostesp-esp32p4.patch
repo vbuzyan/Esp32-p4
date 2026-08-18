@@ -317,6 +317,38 @@ index 0000000..44f7b53
 +}
 +
 +#endif /* CONFIG_IDF_TARGET_ESP32P4 */
+diff --git a/main/scans/wifi/ap_scan.c b/main/scans/wifi/ap_scan.c
+index 8667af3..d552377 100644
+--- a/main/scans/wifi/ap_scan.c
++++ b/main/scans/wifi/ap_scan.c
+@@ -266,6 +266,13 @@ void ap_scan_start(void) {
+         blocking_scan_in_progress = false;
+         goto cleanup;
+     }
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++    // WiFi lives on the ESP32-C6 over esp-hosted: esp_wifi_start() returns before
++    // the C6 station has actually transitioned to STARTED (the event comes back
++    // asynchronously over RPC), so scanning immediately fails with
++    // ESP_ERR_WIFI_STATE. Give the station a moment to come up over the link.
++    vTaskDelay(pdMS_TO_TICKS(300));
++#endif
+ 
+     wifi_scan_config_t scan_config = {
+         .ssid = NULL,
+@@ -292,6 +299,13 @@ void ap_scan_start(void) {
+ #endif
+ 
+     err = esp_wifi_scan_start(&scan_config, true);
++#if defined(CONFIG_IDF_TARGET_ESP32P4)
++    // If the hosted C6 station wasn't ready yet, retry until it is (up to ~3s).
++    for (int attempt = 0; err == ESP_ERR_WIFI_STATE && attempt < 15; attempt++) {
++        vTaskDelay(pdMS_TO_TICKS(200));
++        err = esp_wifi_scan_start(&scan_config, true);
++    }
++#endif
+ 
+     if (err != ESP_OK) {
+         printf("WiFi scan failed to start: %s", esp_err_to_name(err));
 diff --git a/sdkconfig.defaults.p4 b/sdkconfig.defaults.p4
 new file mode 100644
 index 0000000..5c5a1eb
