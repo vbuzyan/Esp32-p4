@@ -1,8 +1,15 @@
-# GhostESP on ESP32-P4 — CrowPanel Advanced 9" HMI
+# GhostESP on ESP32-P4 — CrowPanel Advanced HMI (1024×600)
 
 Bringing [GhostESP](https://github.com/GhostESP-Revival/GhostESP) to the
-**Elecrow CrowPanel Advanced 9-inch ESP32-P4 HMI AI Display**
-(SKU `DHE04209D`, board rev **V1.0**, 1024×600 IPS, MIPI-DSI, capacitive touch).
+**Elecrow CrowPanel Advanced ESP32-P4 HMI AI Display** family, board rev **V1.0**
+(1024×600 IPS, MIPI-DSI, capacitive touch).
+
+**Supported boards (one identical firmware):** the CrowPanel Advanced **7"**,
+**9"** (`DHE04209D`), and **10.1"** ESP32-P4 displays share the same V1.0
+electronics — EK79007 MIPI-DSI panel, GT911 touch (I²C 45/46), ESP32-C6 over
+1-bit SDIO (reset GPIO32), STC8H1K08 battery MCU (I²C `0x2F`), backlight GPIO31,
+LDO ch3/ch4. The `crowpanel_p4` build here runs on all of them unchanged
+(verified booting on hardware: display + C6 WiFi + STC8 battery).
 
 ## Status
 
